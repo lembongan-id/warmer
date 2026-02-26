@@ -14,8 +14,8 @@ const DOMAINS_MAP = {
   us: "https://divinglembongan.com",
   ae: "https://divinglembongan.com",
   uk: "https://divinglembongan.com",
-  hk: "https://divinglembongan.com",
-  br: "https://divinglembongan.com",
+  tw: "https://divinglembongan.com",
+  mx: "https://divinglembongan.com",
 };
 
 
@@ -24,8 +24,8 @@ const PROXIES = {
   us: process.env.BRD_PROXY_US,
   ae: process.env.BRD_PROXY_AE,
   uk: process.env.BRD_PROXY_UK,
-  hk: process.env.BRD_PROXY_HK,
-  br: process.env.BRD_PROXY_BR,
+  tw: process.env.BRD_PROXY_TW,
+  mx: process.env.BRD_PROXY_MX,
 };
 
 
@@ -34,8 +34,8 @@ const USER_AGENTS = {
   us: "Divinglembongan-CacheWarmer-US/1.00",
   ae: "Divinglembongan-CacheWarmer-AE/1.00",
   uk: "Divinglembongan-CacheWarmer-UK/1.00",
-  hk: "Divinglembongan-CacheWarmer-HK/1.00",
-  br: "Divinglembongan-CacheWarmer-BR/1.00",
+  tw: "Divinglembongan-CacheWarmer-TW/1.00",
+  mx: "Divinglembongan-CacheWarmer-MX/1.00",
 };
 
 /* ====== CLOUDFLARE (opsional) ====== */
@@ -87,7 +87,7 @@ class AppsScriptLogger {
       url, // url
       status, // status code
       cfCache, // cf_cache
-      lsCache, // vercel_cache (dipakai utk LiteSpeed)
+      lsCache, // litespeed_cache
       cfRay, // cf_ray
       typeof responseMs === "number" ? responseMs : "", // response_ms
       error ? 1 : 0, // error (0/1)
@@ -147,9 +147,8 @@ async function fetchWithProxy(url, country, timeout = 15000) {
 
 async function fetchIndexSitemaps(domain, country) {
   try {
-    // WordPress Yoast umumnya: /sitemap_index.xml
     const xml = await fetchWithProxy(
-      `${domain}/sitemap_index.xml`,
+      `${domain}/sitemap.xml`,
       country,
       15000
     );
@@ -198,11 +197,18 @@ async function retryableGet(url, cfg, retries = 3) {
     } catch (err) {
       lastError = err;
       const code = err?.code || "";
-      const retryable =
+      const status = err?.response?.status;
+
+      // Retry jika network error ATAU server error (502, 503, 504)
+      const isNetworkError =
         axios.isAxiosError(err) &&
         ["ECONNABORTED", "ECONNRESET", "ETIMEDOUT"].includes(code);
-      if (!retryable) break;
-      await sleep(2000);
+      const isServerError = [502, 503, 504].includes(status);
+
+      if (!isNetworkError && !isServerError) break;
+
+      console.log(`  ⟳ Retry ${i + 1}/${retries} for ${url} (${status || code})`);
+      await sleep(3000); // tunggu 3 detik sebelum retry
     }
   }
   throw lastError;
@@ -260,11 +266,11 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
 
           // Kumpulkan log (TIDAK dikirim sekarang; dikirim sekali di akhir run)
           logger.log({
-            country,
+            country: cfEdge,
             url,
             status: res.status,
             cfCache,
-            lsCache, // disimpan di kolom 'vercel_cache' (header lama)
+            lsCache,
             cfRay,
             responseMs: dt,
             error: 0,
@@ -297,31 +303,34 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
   }
 }
 
-/* ====== MAIN (batch per-run, satu tab) ====== */
+/* ====== MAIN (SEQUENTIAL per-country, satu tab) ====== */
 (async () => {
   console.log(`[CacheWarmer] Started: ${new Date().toISOString()}`);
   const logger = new AppsScriptLogger();
 
   try {
-    await Promise.all(
-      Object.entries(DOMAINS_MAP).map(async ([country, domain]) => {
-        const sitemapList = await fetchIndexSitemaps(domain, country);
-        const urlArrays = await Promise.all(
-          sitemapList.map((sitemapUrl) =>
-            fetchUrlsFromSitemap(sitemapUrl, country)
-          )
-        );
-        const urls = urlArrays.flat().filter(Boolean);
+    // Proses BERURUTAN per-negara (bukan paralel)
+    for (const [country, domain] of Object.entries(DOMAINS_MAP)) {
+      console.log(`\n========== [${country.toUpperCase()}] MULAI ==========`);
 
-        console.log(`[${country}] Found ${urls.length} URLs`);
-        logger.log({
-          country,
-          message: `Found ${urls.length} URLs for ${country}`,
-        });
+      const sitemapList = await fetchIndexSitemaps(domain, country);
+      const urlArrays = await Promise.all(
+        sitemapList.map((sitemapUrl) =>
+          fetchUrlsFromSitemap(sitemapUrl, country)
+        )
+      );
+      const urls = urlArrays.flat().filter(Boolean);
 
-        await warmUrls(urls, country, logger);
-      })
-    );
+      console.log(`[${country}] Found ${urls.length} URLs`);
+      logger.log({
+        country,
+        message: `Found ${urls.length} URLs for ${country}`,
+      });
+
+      await warmUrls(urls, country, logger);
+
+      console.log(`========== [${country.toUpperCase()}] SELESAI ==========\n`);
+    }
   } finally {
     // Kirim SEKALI di akhir → semua baris tersimpan dalam SATU tab (sheetName per-run)
     logger.setFinished();
